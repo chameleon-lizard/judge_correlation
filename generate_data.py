@@ -120,6 +120,20 @@ def save_results(records, output_path):
     print(f"Dataset saved to {output_path}")
 
 
+def load_existing_results(path):
+    """Load existing results from disk if present."""
+    records = []
+    cache = {}
+    if os.path.exists(path):
+        existing_data = datasets.load_from_disk(path)
+        df = existing_data.to_pandas()
+        records = df.to_dict("records")
+        for rec in records:
+            cache[(rec["model_id"], rec["prompt"])] = rec["answer"]
+        print(f"Loaded {len(records)} existing records")
+    return records, cache
+
+
 def main():
     """
     Main function to load dataset, process prompts using multiple models, and save results.
@@ -128,7 +142,7 @@ def main():
     data = datasets.load_from_disk(DATASET_PATH)
     prompts = [row["prompts"] for row in data]
     categories = [row["categories"] for row in data]
-    
+
     # Define models
     models_to_evaluate = [
         "microsoft/phi-4",
@@ -140,20 +154,44 @@ def main():
         "openai/chatgpt-4o-latest",
         "anthropic/claude-3.5-sonnet",
     ]
-    
-    records = []
+
+    records, cache = load_existing_results(OUTPUT_PATH)
+
     for model_id in tqdm(models_to_evaluate, desc="Evaluating Models"):
-        answers = get_answers(prompts, model_id, num_threads=10, temperature=0.0, max_tokens=512)
-        for idx, (prompt, category) in enumerate(zip(prompts, categories)):
-            records.append({
-                "model_id": model_id,
-                "prompt": prompt,
-                "answer": answers[idx],
-                "categories": category,
-            })
-        save_results(records, OUTPUT_PATH)
-    
-    # Save results
+        answers = [None] * len(prompts)
+        missing_indices = []
+        for i, prompt in enumerate(prompts):
+            key = (model_id, prompt)
+            if key in cache:
+                answers[i] = cache[key]
+            else:
+                missing_indices.append(i)
+
+        if missing_indices:
+            prompts_to_fetch = [prompts[i] for i in missing_indices]
+            fetched = get_answers(
+                prompts_to_fetch,
+                model_id,
+                num_threads=10,
+                temperature=0.0,
+                max_tokens=512,
+            )
+            for idx, ans in zip(missing_indices, fetched):
+                answers[idx] = ans
+                rec = {
+                    "model_id": model_id,
+                    "prompt": prompts[idx],
+                    "answer": ans,
+                    "categories": categories[idx],
+                }
+                records.append(rec)
+                cache[(model_id, prompts[idx])] = ans
+                save_results(records, OUTPUT_PATH)
+        else:
+            print(f"All prompts already processed for model {model_id}")
+
+        # If some prompts were cached but records missing? Already handled by load.
+
     save_results(records, OUTPUT_PATH)
 
 
